@@ -1,9 +1,19 @@
-"""NOVA application entry point."""
+import asyncio
+
+from app.core.orchestrator import Orchestrator
 
 
-def main() -> None:
-    print("NOVA foundation initialized.")
+async def main():
+    nova = Orchestrator()
+
+    print("NOVA is ready.")
+    user_message = input("\nYou: ")
+
+    response = await nova.handle(user_message)
+
+    print("\nNOVA:")
+    print(response)
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
