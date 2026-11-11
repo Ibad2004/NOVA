@@ -2,7 +2,8 @@
 import logging
 import os
 
-from app.llm.ollama_client import OllamaClient
+from app.llm.base import BaseLLMClient
+from app.llm.factory import get_llm_client
 from app.core.router import ModelRouter
 from app.core.permissions import PermissionManager
 from app.mcp.client import MCPClient
@@ -67,9 +68,22 @@ def _is_error_result(result: str) -> bool:
     return result.lstrip().upper().startswith(error_prefixes)
 
 
+def _short_error(error: Exception, limit: int = 200) -> str:
+    """Describe an exception as 'Type: first line of message'."""
+
+    lines = str(error).strip().splitlines()
+    message = lines[0] if lines else ""
+
+    if len(message) > limit:
+        message = message[:limit].rstrip() + "..."
+
+    name = type(error).__name__
+    return f"{name}: {message}" if message else name
+
+
 class Orchestrator:
-    def __init__(self):
-        self.llm = OllamaClient()
+    def __init__(self, llm: BaseLLMClient | None = None):
+        self.llm = llm or get_llm_client()
         self.router = ModelRouter()
         self.mcp = MCPClient()
         self.permissions = PermissionManager()
@@ -147,14 +161,11 @@ class Orchestrator:
                 if self.permissions.is_allowed(tool.name)
             ]
 
-            ollama_tools = [
+            tools = [
                 {
-                    "type": "function",
-                    "function": {
-                        "name": tool.name,
-                        "description": tool.description or "",
-                        "parameters": tool.input_schema,
-                    },
+                    "name": tool.name,
+                    "description": tool.description or "",
+                    "parameters": tool.input_schema,
                 }
                 for tool in available_tools
             ]
@@ -170,30 +181,36 @@ class Orchestrator:
                     f"{self.max_tool_steps} ---"
                 )
 
-                response = self.llm.client.chat(
-                    model=self.llm.model,
-                    messages=messages,
-                    tools=ollama_tools,
-                    think=think,
-                    options={
-                        "temperature": self.llm.temperature,
-                        "num_predict": self.llm.max_tokens,
-                    },
-                )
-
-                assistant_message = response["message"]
-
-                if not assistant_message.tool_calls:
+                try:
+                    response = self.llm.chat(messages, tools, think)
+                except Exception as error:
+                    # No retry or fallback here; provider fallback
+                    # is handled separately (issue #2).
+                    provider = getattr(self.llm, "provider", "unknown")
+                    logger.exception(
+                        "LLM call to provider %s failed", provider
+                    )
                     return (
-                        assistant_message.content
+                        f"NOVA could not reach the {provider} model: "
+                        f"{_short_error(error)}. Try again shortly "
+                        "or switch LLM_PROVIDER."
+                    )
+
+                if not response.tool_calls:
+                    return (
+                        response.content
                         or "NOVA did not produce a final response."
                     )
 
-                messages.append(assistant_message)
+                messages.append({
+                    "role": "assistant",
+                    "content": response.content,
+                    "tool_calls": response.tool_calls,
+                })
 
-                for tool_call in assistant_message.tool_calls:
-                    tool_name = tool_call.function.name
-                    arguments = tool_call.function.arguments
+                for tool_call in response.tool_calls:
+                    tool_name = tool_call.name
+                    arguments = tool_call.arguments
 
                     print(f"Requested tool: {tool_name}")
                     print(f"Arguments: {arguments}")
@@ -218,6 +235,8 @@ class Orchestrator:
                             f"Result from {tool_name}:\n"
                             f"{tool_result}"
                         ),
+                        "tool_call_id": tool_call.id,
+                        "name": tool_name,
                     })
 
             return (

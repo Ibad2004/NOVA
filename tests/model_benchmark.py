@@ -16,7 +16,7 @@ def run_test(name: str, prompt: str, think: bool):
 
     start_time = time.perf_counter()
 
-    response = client.chat(
+    response = client.ask(
         prompt,
         think=think,
     )
