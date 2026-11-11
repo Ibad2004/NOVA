@@ -2,6 +2,7 @@
 import logging
 import os
 
+from app.llm.base import BaseLLMClient
 from app.llm.ollama_client import OllamaClient
 from app.core.router import ModelRouter
 from app.core.permissions import PermissionManager
@@ -68,8 +69,8 @@ def _is_error_result(result: str) -> bool:
 
 
 class Orchestrator:
-    def __init__(self):
-        self.llm = OllamaClient()
+    def __init__(self, llm: BaseLLMClient | None = None):
+        self.llm = llm or OllamaClient()
         self.router = ModelRouter()
         self.mcp = MCPClient()
         self.permissions = PermissionManager()
@@ -147,14 +148,11 @@ class Orchestrator:
                 if self.permissions.is_allowed(tool.name)
             ]
 
-            ollama_tools = [
+            tools = [
                 {
-                    "type": "function",
-                    "function": {
-                        "name": tool.name,
-                        "description": tool.description or "",
-                        "parameters": tool.input_schema,
-                    },
+                    "name": tool.name,
+                    "description": tool.description or "",
+                    "parameters": tool.input_schema,
                 }
                 for tool in available_tools
             ]
@@ -170,30 +168,23 @@ class Orchestrator:
                     f"{self.max_tool_steps} ---"
                 )
 
-                response = self.llm.client.chat(
-                    model=self.llm.model,
-                    messages=messages,
-                    tools=ollama_tools,
-                    think=think,
-                    options={
-                        "temperature": self.llm.temperature,
-                        "num_predict": self.llm.max_tokens,
-                    },
-                )
+                response = self.llm.chat(messages, tools, think)
 
-                assistant_message = response["message"]
-
-                if not assistant_message.tool_calls:
+                if not response.tool_calls:
                     return (
-                        assistant_message.content
+                        response.content
                         or "NOVA did not produce a final response."
                     )
 
-                messages.append(assistant_message)
+                messages.append({
+                    "role": "assistant",
+                    "content": response.content,
+                    "tool_calls": response.tool_calls,
+                })
 
-                for tool_call in assistant_message.tool_calls:
-                    tool_name = tool_call.function.name
-                    arguments = tool_call.function.arguments
+                for tool_call in response.tool_calls:
+                    tool_name = tool_call.name
+                    arguments = tool_call.arguments
 
                     print(f"Requested tool: {tool_name}")
                     print(f"Arguments: {arguments}")
@@ -218,6 +209,8 @@ class Orchestrator:
                             f"Result from {tool_name}:\n"
                             f"{tool_result}"
                         ),
+                        "tool_call_id": tool_call.id,
+                        "name": tool_name,
                     })
 
             return (
