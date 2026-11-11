@@ -15,6 +15,8 @@ logger = logging.getLogger(__name__)
 class GroqClient(BaseLLMClient):
     """LLM client for Groq's OpenAI-compatible chat completions API."""
 
+    provider = "groq"
+
     def __init__(self, client=None):
         self.model = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
 

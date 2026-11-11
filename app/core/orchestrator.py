@@ -68,6 +68,19 @@ def _is_error_result(result: str) -> bool:
     return result.lstrip().upper().startswith(error_prefixes)
 
 
+def _short_error(error: Exception, limit: int = 200) -> str:
+    """Describe an exception as 'Type: first line of message'."""
+
+    lines = str(error).strip().splitlines()
+    message = lines[0] if lines else ""
+
+    if len(message) > limit:
+        message = message[:limit].rstrip() + "..."
+
+    name = type(error).__name__
+    return f"{name}: {message}" if message else name
+
+
 class Orchestrator:
     def __init__(self, llm: BaseLLMClient | None = None):
         self.llm = llm or get_llm_client()
@@ -168,7 +181,20 @@ class Orchestrator:
                     f"{self.max_tool_steps} ---"
                 )
 
-                response = self.llm.chat(messages, tools, think)
+                try:
+                    response = self.llm.chat(messages, tools, think)
+                except Exception as error:
+                    # No retry or fallback here; provider fallback
+                    # is handled separately (issue #2).
+                    provider = getattr(self.llm, "provider", "unknown")
+                    logger.exception(
+                        "LLM call to provider %s failed", provider
+                    )
+                    return (
+                        f"NOVA could not reach the {provider} model: "
+                        f"{_short_error(error)}. Try again shortly "
+                        "or switch LLM_PROVIDER."
+                    )
 
                 if not response.tool_calls:
                     return (

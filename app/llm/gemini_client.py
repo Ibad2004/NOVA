@@ -22,6 +22,8 @@ def _reason_name(value) -> str:
 class GeminiClient(BaseLLMClient):
     """LLM client for the Gemini API (google-genai SDK)."""
 
+    provider = "gemini"
+
     def __init__(self, client=None):
         self.model = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
 

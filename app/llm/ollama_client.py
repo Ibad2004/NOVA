@@ -9,6 +9,8 @@ load_dotenv()
 
 
 class OllamaClient(BaseLLMClient):
+    provider = "ollama"
+
     def __init__(self, client=None):
         self.model = os.getenv("OLLAMA_MODEL", "qwen3:8b")
 

@@ -313,6 +313,49 @@ def test_unauthorized_tool_is_denied_without_calling_mcp():
     assert "Permission denied" in tool_message["content"]
 
 
+class FailingLLM(BaseLLMClient):
+    """Simulates a provider outage on every call."""
+
+    provider = "gemini"
+
+    def chat(self, messages, tools=None, think=False):
+        raise ConnectionError("503 Service Unavailable\nretry later")
+
+
+def test_llm_failure_returns_clear_message(caplog):
+    nova = Orchestrator(llm=FailingLLM())
+    fake_mcp = FakeMCP()
+    nova.mcp = fake_mcp
+
+    answer = asyncio.run(nova.handle("What is in a.txt?"))
+
+    assert answer == (
+        "NOVA could not reach the gemini model: "
+        "ConnectionError: 503 Service Unavailable. "
+        "Try again shortly or switch LLM_PROVIDER."
+    )
+    assert fake_mcp.calls == []
+    assert "gemini" in caplog.text
+
+
+def test_llm_failure_without_provider_name():
+    class Broken(BaseLLMClient):
+        def chat(self, messages, tools=None, think=False):
+            raise RuntimeError("x" * 500)
+
+    nova = Orchestrator(llm=Broken())
+    nova.mcp = FakeMCP()
+
+    answer = asyncio.run(nova.handle("Hi"))
+
+    assert answer.startswith(
+        "NOVA could not reach the unknown model: RuntimeError: xxx"
+    )
+    # The 500-character error message is cut to 200 characters.
+    assert "x" * 200 + "..." in answer
+    assert "x" * 201 not in answer
+
+
 # --------------------------------------------------
 # Manual test entry point
 # --------------------------------------------------
