@@ -1,3 +1,4 @@
+import logging
 from unittest.mock import MagicMock
 
 import pytest
@@ -35,14 +36,62 @@ def test_missing_api_key_raises(monkeypatch):
 
 
 def test_model_defaults(monkeypatch):
-    for name in ("GEMINI_MODEL", "GEMINI_TEMPERATURE", "GEMINI_MAX_TOKENS"):
+    for name in ("GEMINI_MODEL", "GEMINI_TEMPERATURE", "GEMINI_MAX_TOKENS",
+                 "GEMINI_THINKING_BUDGET"):
         monkeypatch.delenv(name, raising=False)
 
     client = GeminiClient(client=MagicMock())
 
     assert client.model == "gemini-2.5-flash"
     assert client.temperature == 0.2
-    assert client.max_tokens == 2048
+    assert client.max_tokens == 8192
+    assert client.thinking_budget == -1
+
+
+def thinking_config_for(monkeypatch, model, think, budget=None):
+    """Return the thinking_config sent for one chat() call."""
+
+    monkeypatch.setenv("GEMINI_MODEL", model)
+    if budget is None:
+        monkeypatch.delenv("GEMINI_THINKING_BUDGET", raising=False)
+    else:
+        monkeypatch.setenv("GEMINI_THINKING_BUDGET", budget)
+
+    client, generate = make_client(make_response(types.Part(text="ok")))
+    client.chat([{"role": "user", "content": "Hi"}], think=think)
+    return generate.call_args.kwargs["config"].thinking_config
+
+
+@pytest.mark.parametrize("model", [
+    "gemini-2.5-flash", "gemini-2.5-flash-lite",
+])
+def test_think_false_on_flash_disables_thinking(monkeypatch, model):
+    config = thinking_config_for(monkeypatch, model, think=False)
+
+    assert config.thinking_budget == 0
+
+
+def test_think_false_on_pro_leaves_thinking_unset(monkeypatch):
+    config = thinking_config_for(
+        monkeypatch, "gemini-2.5-pro", think=False
+    )
+
+    assert config is None
+
+
+@pytest.mark.parametrize("model", ["gemini-2.5-flash", "gemini-2.5-pro"])
+def test_think_true_uses_dynamic_budget(monkeypatch, model):
+    config = thinking_config_for(monkeypatch, model, think=True)
+
+    assert config.thinking_budget == -1
+
+
+def test_thinking_budget_env_override(monkeypatch):
+    config = thinking_config_for(
+        monkeypatch, "gemini-2.5-flash", think=True, budget="1024"
+    )
+
+    assert config.thinking_budget == 1024
 
 
 def test_text_reply_and_system_instruction():
@@ -135,6 +184,41 @@ def test_empty_candidates_give_empty_response(response):
     client, _ = make_client(response)
 
     assert client.chat([{"role": "user", "content": "Hi"}]) == LLMResponse()
+
+
+def test_empty_response_logs_finish_reason(caplog):
+    client, _ = make_client(types.GenerateContentResponse(
+        candidates=[
+            types.Candidate(
+                content=types.Content(
+                    role="model",
+                    parts=[types.Part(text="Thinking...", thought=True)],
+                ),
+                finish_reason=types.FinishReason.MAX_TOKENS,
+            )
+        ]
+    ))
+
+    with caplog.at_level(logging.WARNING):
+        response = client.chat([{"role": "user", "content": "Hi"}])
+
+    assert response == LLMResponse()
+    assert "MAX_TOKENS" in caplog.text
+
+
+def test_no_candidates_logs_prompt_feedback(caplog):
+    client, _ = make_client(types.GenerateContentResponse(
+        prompt_feedback=types.GenerateContentResponsePromptFeedback(
+            block_reason=types.BlockedReason.SAFETY,
+        ),
+    ))
+
+    with caplog.at_level(logging.WARNING):
+        response = client.chat([{"role": "user", "content": "Hi"}])
+
+    assert response == LLMResponse()
+    assert "no candidates" in caplog.text
+    assert "SAFETY" in caplog.text
 
 
 def test_unknown_role_raises():

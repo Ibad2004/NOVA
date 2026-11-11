@@ -1,3 +1,4 @@
+import logging
 import os
 import uuid
 
@@ -8,6 +9,14 @@ from google.genai import types
 from app.llm.base import BaseLLMClient, LLMResponse, ToolCall
 
 load_dotenv()
+
+logger = logging.getLogger(__name__)
+
+
+def _reason_name(value) -> str:
+    """Readable name for an SDK enum such as FinishReason."""
+
+    return getattr(value, "value", None) or str(value)
 
 
 class GeminiClient(BaseLLMClient):
@@ -21,7 +30,12 @@ class GeminiClient(BaseLLMClient):
         )
 
         self.max_tokens = int(
-            os.getenv("GEMINI_MAX_TOKENS", "2048")
+            os.getenv("GEMINI_MAX_TOKENS", "8192")
+        )
+
+        # Thinking budget used when think=True; -1 means dynamic.
+        self.thinking_budget = int(
+            os.getenv("GEMINI_THINKING_BUDGET") or "-1"
         )
 
         if client is None:
@@ -152,16 +166,29 @@ class GeminiClient(BaseLLMClient):
 
         candidates = response.candidates or []
         if not candidates:
+            feedback = response.prompt_feedback
+            if feedback is not None:
+                logger.warning(
+                    "Gemini returned no candidates (prompt_feedback: "
+                    "block_reason=%s, message=%s)",
+                    _reason_name(feedback.block_reason),
+                    feedback.block_reason_message,
+                )
+            else:
+                logger.warning("Gemini returned no candidates.")
             return LLMResponse()
 
-        content = candidates[0].content
-        if content is None or not content.parts:
-            return LLMResponse()
+        candidate = candidates[0]
+        parts = (
+            candidate.content.parts
+            if candidate.content is not None
+            else None
+        ) or []
 
         texts = []
         tool_calls = []
 
-        for part in content.parts:
+        for part in parts:
             # Thought summaries are internal reasoning, not the answer.
             if part.thought:
                 continue
@@ -187,10 +214,40 @@ class GeminiClient(BaseLLMClient):
             elif part.text:
                 texts.append(part.text)
 
+        if not texts and not tool_calls:
+            # Usually MAX_TOKENS (thinking used up the budget) or SAFETY.
+            logger.warning(
+                "Gemini returned no text and no tool calls "
+                "(finish_reason=%s).",
+                _reason_name(candidate.finish_reason),
+            )
+
         return LLMResponse(
             content="".join(texts),
             tool_calls=tool_calls,
         )
+
+    def _thinking_config(self, think: bool) -> types.ThinkingConfig | None:
+        """Map NOVA's think flag to a Gemini thinking budget.
+
+        Thinking tokens count toward max_output_tokens, so leaving it
+        on for simple requests can use up the budget before the model
+        writes an answer.
+
+        - think=True: dynamic budget (-1), or GEMINI_THINKING_BUDGET.
+        - think=False: budget 0 on Flash models. Pro models cannot
+          turn thinking off fully, so their default is kept.
+        """
+
+        if think:
+            return types.ThinkingConfig(
+                thinking_budget=self.thinking_budget
+            )
+
+        if "flash" in self.model.lower():
+            return types.ThinkingConfig(thinking_budget=0)
+
+        return None
 
     def chat(
         self,
@@ -198,11 +255,6 @@ class GeminiClient(BaseLLMClient):
         tools: list[dict] | None = None,
         think: bool = False,
     ) -> LLMResponse:
-        # `think` is ignored: Gemini 2.5+ models decide how much to
-        # think on their own (dynamic thinking budget), so NOVA's
-        # keyword-based router does not need to switch it on or off.
-        # Accepting the flag keeps the BaseLLMClient interface the
-        # same for every provider.
         system_instruction, contents = self.to_gemini_contents(messages)
 
         config = types.GenerateContentConfig(
@@ -214,6 +266,7 @@ class GeminiClient(BaseLLMClient):
             automatic_function_calling=(
                 types.AutomaticFunctionCallingConfig(disable=True)
             ),
+            thinking_config=self._thinking_config(think),
         )
 
         response = self.client.models.generate_content(
