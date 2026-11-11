@@ -3,7 +3,7 @@ import logging
 import os
 
 from app.llm.base import BaseLLMClient
-from app.llm.ollama_client import OllamaClient
+from app.llm.factory import get_llm_client
 from app.core.router import ModelRouter
 from app.core.permissions import PermissionManager
 from app.mcp.client import MCPClient
@@ -70,7 +70,7 @@ def _is_error_result(result: str) -> bool:
 
 class Orchestrator:
     def __init__(self, llm: BaseLLMClient | None = None):
-        self.llm = llm or OllamaClient()
+        self.llm = llm or get_llm_client()
         self.router = ModelRouter()
         self.mcp = MCPClient()
         self.permissions = PermissionManager()
